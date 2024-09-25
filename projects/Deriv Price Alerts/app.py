@@ -1,3 +1,4 @@
+from flask import Flask, render_template, request, redirect, url_for
 import websocket
 import json
 import smtplib
@@ -19,6 +20,11 @@ TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
 
 # Define WebSocket URL for Deriv API
 DERIV_API_URL = "wss://ws.binaryws.com/websockets/v3?app_id=1089"  # Replace 1089 with your app_id
+
+# Initialize Flask app
+app = Flask(__name__)
+
+alert_prices = {}
 
 def send_email(subject, message):
     """Function to send email using SSL."""
@@ -53,23 +59,25 @@ def send_telegram_message(message):
     except Exception as e:
         print(f"Error sending message to Telegram: {e}")
 
-# Function to take user input for instrument, desired alert price, and custom message
-def get_user_input():
-    alert_prices = {}  # Initialize an empty dictionary to store alerts
-    while True:
-        instrument = input("Enter the instrument/pair you want to track (e.g., frxEURUSD, R_50, CRASH500 etc.) or type 'done' to finish: ")
-        if instrument.lower() == 'done':
-            break
-        try:
-            target_price = float(input(f"Enter the desired price for {instrument}: "))
-            custom_message = input(f"Please enter a message for when {instrument} reaches the desired price: ")
-            alert_prices[instrument] = {
-                'target_price': target_price,
-                'custom_message': custom_message
-            }
-        except ValueError:
-            print("Invalid input. Please enter a valid number for the price.")
-    return alert_prices
+# Flask route for the homepage
+@app.route('/')
+def index():
+    return render_template('index.html')
+
+# Flask route to handle form submission
+@app.route('/set_alert', methods=['POST'])
+def set_alert():
+    global alert_prices
+    instrument = request.form['instrument']
+    target_price = float(request.form['target_price'])
+    custom_message = request.form['custom_message']
+
+    alert_prices[instrument] = {
+        'target_price': target_price,
+        'custom_message': custom_message
+    }
+
+    return redirect(url_for('index'))
 
 # Function to handle incoming WebSocket messages
 def on_message(ws, message):
@@ -80,15 +88,13 @@ def on_message(ws, message):
         timestamp = data['tick']['epoch']
         print(f"Instrument: {symbol}, Price: {price}, Timestamp: {timestamp}")
 
-        # Define a small tolerance for price comparison
-        tolerance = 0.1  # Adjust this value as needed for your use case
+        tolerance = 0.1  # Small tolerance for price comparison
 
-        # Check if the price is within the tolerance range of the alert threshold
         if symbol in alert_prices:
             target_price = alert_prices[symbol]['target_price']
             custom_message = alert_prices[symbol]['custom_message']
-            if abs(price - target_price) <= tolerance:  # Use tolerance for comparison
-                alert_message = f"ALERT: {symbol} has reached the desired price of {target_price}! The current price is: {price}\n{custom_message}"
+            if abs(price - target_price) <= tolerance:
+                alert_message = f"ALERT: {symbol} has reached the desired price of {target_price}! Current price: {price}\n{custom_message}"
                 print(f"*** {alert_message} ***")
 
                 # Send an email alert
@@ -97,44 +103,35 @@ def on_message(ws, message):
                 # Send a Telegram alert
                 send_telegram_message(alert_message)
 
-                # Remove the instrument from the alert list
                 del alert_prices[symbol]
 
-                # Check if all alerts are done, then close WebSocket
                 if not alert_prices:
-                    print("All price alerts have been triggered. Closing WebSocket connection.")
+                    print("All price alerts triggered. Closing WebSocket connection.")
                     ws.close()
 
-# Function to handle WebSocket errors
 def on_error(ws, error):
     print(f"Error: {error}")
 
-# Function to handle WebSocket closure
 def on_close(ws, close_status_code, close_msg):
     print("WebSocket connection closed")
 
-# Function to handle WebSocket connection opening
 def on_open(ws):
     print("WebSocket connection opened")
-    # Subscribe to tick updates for each instrument
     for instrument in alert_prices.keys():
         subscribe_message = json.dumps({"ticks": instrument})
         ws.send(subscribe_message)
 
-# Main function to run the bot
+@app.route('/start_ws')
+def start_ws():
+    # Create WebSocket App instance and run the WebSocket connection
+    ws = websocket.WebSocketApp(DERIV_API_URL,
+                                on_open=on_open,
+                                on_message=on_message,
+                                on_error=on_error,
+                                on_close=on_close)
+    ws.run_forever()
+    return "WebSocket started"
+
+# Run the Flask app
 if __name__ == "__main__":
-    # Get user input for instruments, alert prices, and custom messages
-    alert_prices = get_user_input()
-
-    if not alert_prices:
-        print("No instruments were provided. Exiting.")
-    else:
-        # Create WebSocket App instance
-        ws = websocket.WebSocketApp(DERIV_API_URL,
-                                    on_open=on_open,
-                                    on_message=on_message,
-                                    on_error=on_error,
-                                    on_close=on_close)
-
-        # Run the WebSocket connection
-        ws.run_forever()
+    app.run(debug=True)
